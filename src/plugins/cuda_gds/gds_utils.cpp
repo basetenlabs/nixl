@@ -16,6 +16,7 @@
  */
 #include "gds_utils.h"
 #include "common/nixl_log.h"
+#include <sys/file.h>
 
 nixl_status_t gdsUtil::registerFileHandle(int fd,
                                           size_t size,
@@ -58,9 +59,20 @@ nixl_status_t gdsUtil::registerBufHandle(void *ptr,
 
 nixl_status_t gdsUtil::openGdsDriver()
 {
-    CUfileError_t err;
+    // cuFileDriverOpen is not safe to call concurrently from multiple processes
+    // (libcufile 1.16.0 bug). Serialize with flock across MPI ranks.
+    int lock_fd = open("/tmp/.nixl_gds_driver.lock", O_CREAT | O_RDWR, 0666);
+    if (lock_fd >= 0) {
+        flock(lock_fd, LOCK_EX);
+    }
 
-    err = cuFileDriverOpen();
+    CUfileError_t err = cuFileDriverOpen();
+
+    if (lock_fd >= 0) {
+        flock(lock_fd, LOCK_UN);
+        close(lock_fd);
+    }
+
     if (err.err != CU_FILE_SUCCESS) {
         NIXL_ERROR << "Error initializing GPU Direct Storage driver";
         return NIXL_ERR_BACKEND;
