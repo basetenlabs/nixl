@@ -36,6 +36,13 @@ private:
     std::unique_ptr<nixlPosixQueue> queue; // Async I/O queue instance
     const nixlPosixQueue::queue_t queue_type_; // Type of queue used
 
+    // Bounce buffer for VRAM_SEG support (FILE <-> VRAM via DRAM bounce)
+    bool uses_vram_bounce_ = false;
+    std::vector<void*> bounce_bufs_;       // pinned DRAM bounce buffers
+    std::vector<size_t> bounce_sizes_;     // size of each bounce buffer
+    std::vector<void*> vram_addrs_;        // original VRAM addresses
+    int vram_device_id_ = 0;              // CUDA device for the VRAM buffers
+
     nixl_status_t
     initQueues(); // Initialize async I/O queue
 
@@ -45,7 +52,7 @@ public:
                          const nixl_meta_dlist_t &remote,
                          const nixl_opt_b_args_t *opt_args,
                          const nixl_b_params_t *custom_params);
-    ~nixlPosixBackendReqH() {};
+    ~nixlPosixBackendReqH();
 
     nixl_status_t
     postXfer();
@@ -94,7 +101,7 @@ public:
 
     nixl_mem_list_t
     getSupportedMems() const override {
-        return {FILE_SEG, DRAM_SEG};
+        return {FILE_SEG, DRAM_SEG, VRAM_SEG};
     }
 
     nixl_status_t

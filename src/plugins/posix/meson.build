@@ -18,7 +18,20 @@ if not has_posix_plugin
     subdir_done()
 endif
 
-plugin_deps = [nixl_infra, nixl_common_dep, file_utils_interface]
+cuda_dep = dependency('cuda', version: '>=11.0', modules: ['cudart'], required: false)
+if not cuda_dep.found()
+    # Fallback: find cudart manually
+    cuda_dep = declare_dependency(
+        include_directories: include_directories(get_option('cudapath_inc') != '' ? get_option('cudapath_inc') : '/usr/local/cuda/include'),
+        dependencies: [
+            meson.get_compiler('cpp').find_library('cudart',
+                dirs: get_option('cudapath_lib') != '' ? [get_option('cudapath_lib')] : ['/usr/local/cuda/lib64'],
+                required: true)
+        ]
+    )
+endif
+
+plugin_deps = [nixl_infra, nixl_common_dep, file_utils_interface, cuda_dep]
 
 # Define base source files
 posix_sources = [

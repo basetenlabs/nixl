@@ -26,6 +26,7 @@
 #include "queue_factory_impl.h"
 #include "nixl_types.h"
 #include "file/file_utils.h"
+#include <cuda_runtime.h>
 
 namespace {
 bool
@@ -42,8 +43,8 @@ isValidPrepXferParams(const nixl_xfer_op_t &operation,
         return false;
     }
 
-    if (local.getType() != DRAM_SEG) {
-        NIXL_ERROR << absl::StrFormat("Error: Local memory type must be DRAM_SEG, got %d",
+    if (local.getType() != DRAM_SEG && local.getType() != VRAM_SEG) {
+        NIXL_ERROR << absl::StrFormat("Error: Local memory type must be DRAM_SEG or VRAM_SEG, got %d",
                                       local.getType());
         return false;
     }
@@ -177,10 +178,50 @@ nixlPosixBackendReqH::nixlPosixBackendReqH(const nixl_xfer_op_t &op,
                         NIXL_ERR_INVALID_PARAM);
     }
 
+    // If local is VRAM, allocate pinned DRAM bounce buffers
+    if (local.getType() == VRAM_SEG) {
+        uses_vram_bounce_ = true;
+        int count = local.descCount();
+        bounce_bufs_.resize(count, nullptr);
+        bounce_sizes_.resize(count);
+        vram_addrs_.resize(count);
+
+        if (count > 0) {
+            vram_device_id_ = local[0].devId;
+        }
+
+        for (int i = 0; i < count; i++) {
+            vram_addrs_[i] = reinterpret_cast<void*>(local[i].addr);
+            bounce_sizes_[i] = local[i].len;
+            cudaError_t cerr = cudaMallocHost(&bounce_bufs_[i], bounce_sizes_[i]);
+            if (cerr != cudaSuccess) {
+                // Clean up already allocated buffers
+                for (int j = 0; j < i; j++) {
+                    cudaFreeHost(bounce_bufs_[j]);
+                }
+                throw exception(
+                    absl::StrFormat("Failed to allocate pinned bounce buffer (%zu bytes): %s",
+                                   bounce_sizes_[i], cudaGetErrorString(cerr)),
+                    NIXL_ERR_BACKEND);
+            }
+        }
+        NIXL_INFO << "POSIX: allocated " << count << " pinned bounce buffers for VRAM transfer";
+    }
+
     nixl_status_t status = initQueues();
     if (status != NIXL_SUCCESS) {
+        // Clean up bounce buffers on failure
+        for (auto buf : bounce_bufs_) {
+            if (buf) cudaFreeHost(buf);
+        }
         throw exception(absl::StrFormat("Failed to initialize queues: %s", to_string(queue_type_)),
                         status);
+    }
+}
+
+nixlPosixBackendReqH::~nixlPosixBackendReqH() {
+    for (auto buf : bounce_bufs_) {
+        if (buf) cudaFreeHost(buf);
     }
 }
 
@@ -215,11 +256,28 @@ nixlPosixBackendReqH::initQueues() {
 
 nixl_status_t
 nixlPosixBackendReqH::prepXfer() {
+    int idx = 0;
     for (auto [local_it, remote_it] = std::make_pair(local.begin(), remote.begin());
          local_it != local.end() && remote_it != remote.end();
-         ++local_it, ++remote_it) {
+         ++local_it, ++remote_it, ++idx) {
+
+        // For VRAM bounce: use the pinned bounce buffer instead of VRAM address
+        void *io_buf = uses_vram_bounce_
+            ? bounce_bufs_[idx]
+            : reinterpret_cast<void *>(local_it->addr);
+
+        // For Write (VRAM->FILE): pre-copy VRAM to bounce buffer before POSIX write
+        if (uses_vram_bounce_ && operation == NIXL_WRITE) {
+            cudaError_t cerr = cudaMemcpy(bounce_bufs_[idx], vram_addrs_[idx],
+                                          bounce_sizes_[idx], cudaMemcpyDeviceToHost);
+            if (cerr != cudaSuccess) {
+                NIXL_ERROR << "POSIX: cudaMemcpy D2H failed: " << cudaGetErrorString(cerr);
+                return NIXL_ERR_BACKEND;
+            }
+        }
+
         nixl_status_t status = queue->prepIO(remote_it->devId,
-                                             reinterpret_cast<void *>(local_it->addr),
+                                             io_buf,
                                              remote_it->len,
                                              remote_it->addr);
 
@@ -234,7 +292,27 @@ nixlPosixBackendReqH::prepXfer() {
 
 nixl_status_t
 nixlPosixBackendReqH::checkXfer() {
-    return queue->checkCompleted();
+    nixl_status_t status = queue->checkCompleted();
+
+    // For Read (FILE->VRAM): after POSIX I/O completes, copy bounce buffers to VRAM
+    if (status == NIXL_SUCCESS && uses_vram_bounce_ && operation == NIXL_READ) {
+        cudaError_t cerr = cudaSetDevice(vram_device_id_);
+        if (cerr != cudaSuccess) {
+            NIXL_ERROR << "POSIX: cudaSetDevice failed: " << cudaGetErrorString(cerr);
+            return NIXL_ERR_BACKEND;
+        }
+        for (size_t i = 0; i < bounce_bufs_.size(); i++) {
+            cerr = cudaMemcpy(vram_addrs_[i], bounce_bufs_[i],
+                              bounce_sizes_[i], cudaMemcpyHostToDevice);
+            if (cerr != cudaSuccess) {
+                NIXL_ERROR << "POSIX: cudaMemcpy H2D failed for buffer " << i
+                           << ": " << cudaGetErrorString(cerr);
+                return NIXL_ERR_BACKEND;
+            }
+        }
+    }
+
+    return status;
 }
 
 nixl_status_t
