@@ -36,6 +36,10 @@ private:
     std::unique_ptr<nixlPosixQueue> queue; // Async I/O queue instance
     const nixlPosixQueue::queue_t queue_type_; // Type of queue used
 
+    // When caller passes local=FILE, remote={DRAM,VRAM}, we internally swap
+    // so that mem_local_={DRAM,VRAM} and file_remote_=FILE for POSIX I/O.
+    bool swapped_ = false;
+
     // Bounce buffer for VRAM_SEG support (FILE <-> VRAM via DRAM bounce)
     bool uses_vram_bounce_ = false;
     std::vector<void*> bounce_bufs_;       // pinned DRAM bounce buffers

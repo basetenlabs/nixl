@@ -43,15 +43,17 @@ isValidPrepXferParams(const nixl_xfer_op_t &operation,
         return false;
     }
 
-    if (local.getType() != DRAM_SEG && local.getType() != VRAM_SEG) {
-        NIXL_ERROR << absl::StrFormat("Error: Local memory type must be DRAM_SEG or VRAM_SEG, got %d",
-                                      local.getType());
-        return false;
-    }
-
-    if (remote.getType() != FILE_SEG) {
-        NIXL_ERROR << absl::StrFormat("Error: Remote memory type must be FILE_SEG, got %d",
-                                      remote.getType());
+    // Accept both orientations:
+    //   normal:  local={DRAM,VRAM}, remote=FILE
+    //   swapped: local=FILE, remote={DRAM,VRAM}  (caller passed src/dst in wrong order)
+    bool normal = (local.getType() == DRAM_SEG || local.getType() == VRAM_SEG) &&
+                  remote.getType() == FILE_SEG;
+    bool swapped = local.getType() == FILE_SEG &&
+                   (remote.getType() == DRAM_SEG || remote.getType() == VRAM_SEG);
+    if (!normal && !swapped) {
+        NIXL_ERROR << absl::StrFormat(
+            "Error: Expected {DRAM/VRAM,FILE} or {FILE,DRAM/VRAM} pair, got local=%d remote=%d",
+            local.getType(), remote.getType());
         return false;
     }
 
@@ -178,24 +180,35 @@ nixlPosixBackendReqH::nixlPosixBackendReqH(const nixl_xfer_op_t &op,
                         NIXL_ERR_INVALID_PARAM);
     }
 
-    // If local is VRAM, allocate pinned DRAM bounce buffers
-    if (local.getType() == VRAM_SEG) {
+    // Detect swapped orientation: local=FILE, remote={DRAM,VRAM}
+    // In this case the caller passed src/dst in the wrong order for POSIX.
+    // We handle it transparently by swapping internally.
+    if (local.getType() == FILE_SEG &&
+        (remote.getType() == DRAM_SEG || remote.getType() == VRAM_SEG)) {
+        swapped_ = true;
+        NIXL_INFO << "POSIX: detected swapped local/remote orientation, handling transparently";
+    }
+
+    // Determine which side has the memory (DRAM/VRAM) buffers
+    const nixl_meta_dlist_t &mem_side = swapped_ ? remote : local;
+
+    // If memory side is VRAM, allocate pinned DRAM bounce buffers
+    if (mem_side.getType() == VRAM_SEG) {
         uses_vram_bounce_ = true;
-        int count = local.descCount();
+        int count = mem_side.descCount();
         bounce_bufs_.resize(count, nullptr);
         bounce_sizes_.resize(count);
         vram_addrs_.resize(count);
 
         if (count > 0) {
-            vram_device_id_ = local[0].devId;
+            vram_device_id_ = mem_side[0].devId;
         }
 
         for (int i = 0; i < count; i++) {
-            vram_addrs_[i] = reinterpret_cast<void*>(local[i].addr);
-            bounce_sizes_[i] = local[i].len;
+            vram_addrs_[i] = reinterpret_cast<void*>(mem_side[i].addr);
+            bounce_sizes_[i] = mem_side[i].len;
             cudaError_t cerr = cudaMallocHost(&bounce_bufs_[i], bounce_sizes_[i]);
             if (cerr != cudaSuccess) {
-                // Clean up already allocated buffers
                 for (int j = 0; j < i; j++) {
                     cudaFreeHost(bounce_bufs_[j]);
                 }
@@ -256,18 +269,26 @@ nixlPosixBackendReqH::initQueues() {
 
 nixl_status_t
 nixlPosixBackendReqH::prepXfer() {
+    // Determine which side is memory (DRAM/VRAM) and which is file
+    const nixl_meta_dlist_t &mem_side = swapped_ ? remote : local;
+    const nixl_meta_dlist_t &file_side = swapped_ ? local : remote;
+
+    // Determine effective operation: if swapped, Read becomes Write semantics and vice versa
+    // (because POSIX queue sees local_buf + file_fd, and the direction flips)
+    bool effective_write = swapped_ ? (operation == NIXL_READ) : (operation == NIXL_WRITE);
+
     int idx = 0;
-    for (auto [local_it, remote_it] = std::make_pair(local.begin(), remote.begin());
-         local_it != local.end() && remote_it != remote.end();
-         ++local_it, ++remote_it, ++idx) {
+    for (auto [mem_it, file_it] = std::make_pair(mem_side.begin(), file_side.begin());
+         mem_it != mem_side.end() && file_it != file_side.end();
+         ++mem_it, ++file_it, ++idx) {
 
         // For VRAM bounce: use the pinned bounce buffer instead of VRAM address
         void *io_buf = uses_vram_bounce_
             ? bounce_bufs_[idx]
-            : reinterpret_cast<void *>(local_it->addr);
+            : reinterpret_cast<void *>(mem_it->addr);
 
-        // For Write (VRAM->FILE): pre-copy VRAM to bounce buffer before POSIX write
-        if (uses_vram_bounce_ && operation == NIXL_WRITE) {
+        // For effective Write (mem->FILE): pre-copy VRAM to bounce buffer before POSIX write
+        if (uses_vram_bounce_ && effective_write) {
             cudaError_t cerr = cudaMemcpy(bounce_bufs_[idx], vram_addrs_[idx],
                                           bounce_sizes_[idx], cudaMemcpyDeviceToHost);
             if (cerr != cudaSuccess) {
@@ -276,10 +297,10 @@ nixlPosixBackendReqH::prepXfer() {
             }
         }
 
-        nixl_status_t status = queue->prepIO(remote_it->devId,
+        nixl_status_t status = queue->prepIO(file_it->devId,
                                              io_buf,
-                                             remote_it->len,
-                                             remote_it->addr);
+                                             file_it->len,
+                                             file_it->addr);
 
         if (status != NIXL_SUCCESS) {
             NIXL_ERROR << "Error preparing I/O operation";
@@ -294,8 +315,11 @@ nixl_status_t
 nixlPosixBackendReqH::checkXfer() {
     nixl_status_t status = queue->checkCompleted();
 
-    // For Read (FILE->VRAM): after POSIX I/O completes, copy bounce buffers to VRAM
-    if (status == NIXL_SUCCESS && uses_vram_bounce_ && operation == NIXL_READ) {
+    // Effective read = data going from FILE to mem (DRAM/VRAM)
+    bool effective_read = swapped_ ? (operation == NIXL_WRITE) : (operation == NIXL_READ);
+
+    // After POSIX I/O completes for effective read, copy bounce buffers to VRAM
+    if (status == NIXL_SUCCESS && uses_vram_bounce_ && effective_read) {
         cudaError_t cerr = cudaSetDevice(vram_device_id_);
         if (cerr != cudaSuccess) {
             NIXL_ERROR << "POSIX: cudaSetDevice failed: " << cudaGetErrorString(cerr);
