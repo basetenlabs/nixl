@@ -48,7 +48,7 @@ struct GpuBuf {
     size_t size;
 
     GpuBuf(size_t sz) : ptr(nullptr), size(sz) {
-        cudaError_t ret = cudaMalloc(&ptr, sz);
+        cudaError_t ret __attribute__((unused)) = cudaMalloc(&ptr, sz);
         assert(ret == cudaSuccess);
         cudaMemset(ptr, 0, sz);
     }
@@ -118,16 +118,16 @@ bool test_file_to_vram_read_normal() {
     TestFile file("t1.dat", SMALL_SIZE, 'A');
     GpuBuf gpu(SMALL_SIZE);
 
-    nixlRegDList freg(FILE_SEG);
+    nixl_reg_dlist_t freg(FILE_SEG);
     freg.addDesc({0, SMALL_SIZE, (uint64_t)file.fd, ""});
     if (agent.registerMem(freg) != NIXL_SUCCESS) return false;
 
-    nixlRegDList vreg(VRAM_SEG);
+    nixl_reg_dlist_t vreg(VRAM_SEG);
     vreg.addDesc({(uintptr_t)gpu.ptr, SMALL_SIZE, 0, ""});
     if (agent.registerMem(vreg) != NIXL_SUCCESS) return false;
 
     // Normal: local=VRAM(dst), remote=FILE(src)
-    nixlXferDList local_dl(VRAM_SEG), remote_dl(FILE_SEG);
+    nixl_xfer_dlist_t local_dl(VRAM_SEG), remote_dl(FILE_SEG);
     local_dl.addDesc({(uintptr_t)gpu.ptr, SMALL_SIZE, 0});
     remote_dl.addDesc({0, SMALL_SIZE, (uint64_t)file.fd});
 
@@ -152,16 +152,16 @@ bool test_file_to_vram_read_swapped() {
     TestFile file("t2.dat", SMALL_SIZE, 'B');
     GpuBuf gpu(SMALL_SIZE);
 
-    nixlRegDList freg(FILE_SEG);
+    nixl_reg_dlist_t freg(FILE_SEG);
     freg.addDesc({0, SMALL_SIZE, (uint64_t)file.fd, ""});
     if (agent.registerMem(freg) != NIXL_SUCCESS) return false;
 
-    nixlRegDList vreg(VRAM_SEG);
+    nixl_reg_dlist_t vreg(VRAM_SEG);
     vreg.addDesc({(uintptr_t)gpu.ptr, SMALL_SIZE, 0, ""});
     if (agent.registerMem(vreg) != NIXL_SUCCESS) return false;
 
     // Swapped: local=FILE(src), remote=VRAM(dst)
-    nixlXferDList local_dl(FILE_SEG), remote_dl(VRAM_SEG);
+    nixl_xfer_dlist_t local_dl(FILE_SEG), remote_dl(VRAM_SEG);
     local_dl.addDesc({0, SMALL_SIZE, (uint64_t)file.fd});
     remote_dl.addDesc({(uintptr_t)gpu.ptr, SMALL_SIZE, 0});
 
@@ -186,15 +186,15 @@ bool test_vram_to_file_write() {
     GpuBuf gpu(SMALL_SIZE);
     gpu.fill('C');
 
-    nixlRegDList freg(FILE_SEG);
+    nixl_reg_dlist_t freg(FILE_SEG);
     freg.addDesc({0, SMALL_SIZE, (uint64_t)file.fd, ""});
     if (agent.registerMem(freg) != NIXL_SUCCESS) return false;
 
-    nixlRegDList vreg(VRAM_SEG);
+    nixl_reg_dlist_t vreg(VRAM_SEG);
     vreg.addDesc({(uintptr_t)gpu.ptr, SMALL_SIZE, 0, ""});
     if (agent.registerMem(vreg) != NIXL_SUCCESS) return false;
 
-    nixlXferDList local_dl(VRAM_SEG), remote_dl(FILE_SEG);
+    nixl_xfer_dlist_t local_dl(VRAM_SEG), remote_dl(FILE_SEG);
     local_dl.addDesc({(uintptr_t)gpu.ptr, SMALL_SIZE, 0});
     remote_dl.addDesc({0, SMALL_SIZE, (uint64_t)file.fd});
 
@@ -222,16 +222,16 @@ bool test_vram_to_file_write_swapped() {
     GpuBuf gpu(SMALL_SIZE);
     gpu.fill('D');
 
-    nixlRegDList freg(FILE_SEG);
+    nixl_reg_dlist_t freg(FILE_SEG);
     freg.addDesc({0, SMALL_SIZE, (uint64_t)file.fd, ""});
     if (agent.registerMem(freg) != NIXL_SUCCESS) return false;
 
-    nixlRegDList vreg(VRAM_SEG);
+    nixl_reg_dlist_t vreg(VRAM_SEG);
     vreg.addDesc({(uintptr_t)gpu.ptr, SMALL_SIZE, 0, ""});
     if (agent.registerMem(vreg) != NIXL_SUCCESS) return false;
 
     // Swapped write: local=FILE, remote=VRAM
-    nixlXferDList local_dl(FILE_SEG), remote_dl(VRAM_SEG);
+    nixl_xfer_dlist_t local_dl(FILE_SEG), remote_dl(VRAM_SEG);
     local_dl.addDesc({0, SMALL_SIZE, (uint64_t)file.fd});
     remote_dl.addDesc({(uintptr_t)gpu.ptr, SMALL_SIZE, 0});
 
@@ -266,8 +266,8 @@ bool test_large_multi_desc() {
 
     GpuBuf gpu(total);
 
-    nixlRegDList freg(FILE_SEG);
-    nixlRegDList vreg(VRAM_SEG);
+    nixl_reg_dlist_t freg(FILE_SEG);
+    nixl_reg_dlist_t vreg(VRAM_SEG);
     for (int i = 0; i < NUM_BLOCKS; i++) {
         freg.addDesc({(uint64_t)(i * MEDIUM_SIZE), MEDIUM_SIZE, (uint64_t)file.fd, ""});
         vreg.addDesc({(uintptr_t)gpu.ptr + i * MEDIUM_SIZE, MEDIUM_SIZE, 0, ""});
@@ -275,7 +275,7 @@ bool test_large_multi_desc() {
     if (agent.registerMem(freg) != NIXL_SUCCESS) return false;
     if (agent.registerMem(vreg) != NIXL_SUCCESS) return false;
 
-    nixlXferDList local_dl(VRAM_SEG), remote_dl(FILE_SEG);
+    nixl_xfer_dlist_t local_dl(VRAM_SEG), remote_dl(FILE_SEG);
     for (int i = 0; i < NUM_BLOCKS; i++) {
         local_dl.addDesc({(uintptr_t)gpu.ptr + i * MEDIUM_SIZE, MEDIUM_SIZE, 0});
         remote_dl.addDesc({(uint64_t)(i * MEDIUM_SIZE), MEDIUM_SIZE, (uint64_t)file.fd});
@@ -312,16 +312,16 @@ bool test_dram_file_regression() {
     posix_memalign(&host_buf, 4096, SMALL_SIZE);
     memset(host_buf, 0, SMALL_SIZE);
 
-    nixlRegDList freg(FILE_SEG);
+    nixl_reg_dlist_t freg(FILE_SEG);
     freg.addDesc({0, SMALL_SIZE, (uint64_t)file.fd, ""});
     if (agent.registerMem(freg) != NIXL_SUCCESS) { free(host_buf); return false; }
 
-    nixlRegDList dreg(DRAM_SEG);
+    nixl_reg_dlist_t dreg(DRAM_SEG);
     dreg.addDesc({(uintptr_t)host_buf, SMALL_SIZE, 0, ""});
     if (agent.registerMem(dreg) != NIXL_SUCCESS) { free(host_buf); return false; }
 
     // Normal DRAM read: local=DRAM, remote=FILE
-    nixlXferDList local_dl(DRAM_SEG), remote_dl(FILE_SEG);
+    nixl_xfer_dlist_t local_dl(DRAM_SEG), remote_dl(FILE_SEG);
     local_dl.addDesc({(uintptr_t)host_buf, SMALL_SIZE, 0});
     remote_dl.addDesc({0, SMALL_SIZE, (uint64_t)file.fd});
 
