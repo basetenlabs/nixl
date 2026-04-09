@@ -34,7 +34,7 @@ struct TestFile {
         fd = open(path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
         assert(fd >= 0);
         std::vector<char> buf(size, fill);
-        pwrite(fd, buf.data(), size, 0);
+        (void)pwrite(fd, buf.data(), size, 0);
         fsync(fd);
     }
     ~TestFile() {
@@ -205,7 +205,7 @@ bool test_vram_to_file_write() {
 
     // Read file back and verify
     char rbuf[SMALL_SIZE];
-    pread(file.fd, rbuf, SMALL_SIZE, 0);
+    (void)pread(file.fd, rbuf, SMALL_SIZE, 0);
     bool ok = (rbuf[0] == 'C' && rbuf[SMALL_SIZE - 1] == 'C');
     agent.releaseXferReq(h);
     return ok;
@@ -241,7 +241,7 @@ bool test_vram_to_file_write_swapped() {
     if (wait_xfer(agent, h) != NIXL_SUCCESS) return false;
 
     char rbuf[SMALL_SIZE];
-    pread(file.fd, rbuf, SMALL_SIZE, 0);
+    (void)pread(file.fd, rbuf, SMALL_SIZE, 0);
     bool ok = (rbuf[0] == 'D' && rbuf[SMALL_SIZE - 1] == 'D');
     agent.releaseXferReq(h);
     return ok;
@@ -260,7 +260,7 @@ bool test_large_multi_desc() {
     // Write unique pattern per block
     for (int i = 0; i < NUM_BLOCKS; i++) {
         std::vector<char> buf(MEDIUM_SIZE, 'A' + (i % 26));
-        pwrite(file.fd, buf.data(), MEDIUM_SIZE, i * MEDIUM_SIZE);
+        (void)pwrite(file.fd, buf.data(), MEDIUM_SIZE, i * MEDIUM_SIZE);
     }
     fsync(file.fd);
 
