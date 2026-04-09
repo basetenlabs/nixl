@@ -273,9 +273,9 @@ nixlPosixBackendReqH::prepXfer() {
     const nixl_meta_dlist_t &mem_side = swapped_ ? remote : local;
     const nixl_meta_dlist_t &file_side = swapped_ ? local : remote;
 
-    // Determine effective operation: if swapped, Read becomes Write semantics and vice versa
-    // (because POSIX queue sees local_buf + file_fd, and the direction flips)
-    bool effective_write = swapped_ ? (operation == NIXL_READ) : (operation == NIXL_WRITE);
+    // Operation direction stays the same regardless of swap.
+    // Swap only affects which descriptor list is mem vs file, not the I/O direction.
+    bool effective_write = (operation == NIXL_WRITE);
 
     int idx = 0;
     for (auto [mem_it, file_it] = std::make_pair(mem_side.begin(), file_side.begin());
@@ -315,8 +315,8 @@ nixl_status_t
 nixlPosixBackendReqH::checkXfer() {
     nixl_status_t status = queue->checkCompleted();
 
-    // Effective read = data going from FILE to mem (DRAM/VRAM)
-    bool effective_read = swapped_ ? (operation == NIXL_WRITE) : (operation == NIXL_READ);
+    // Operation direction stays the same regardless of swap.
+    bool effective_read = (operation == NIXL_READ);
 
     // After POSIX I/O completes for effective read, copy bounce buffers to VRAM
     if (status == NIXL_SUCCESS && uses_vram_bounce_ && effective_read) {
