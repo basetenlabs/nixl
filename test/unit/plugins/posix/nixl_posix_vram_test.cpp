@@ -25,6 +25,14 @@ constexpr size_t MEDIUM_SIZE = 512 * 1024;   // 512KB
 constexpr int    NUM_BLOCKS  = 16;
 constexpr char   TEST_DIR[]  = "/tmp/nixl_posix_vram_test";
 
+#define CHECK_IO(expr, expected) do { \
+    ssize_t _r = (expr); \
+    if (_r != (ssize_t)(expected)) { \
+        std::cerr << "IO error at " << __LINE__ << ": got " << _r << std::endl; \
+        abort(); \
+    } \
+} while(0)
+
 struct TestFile {
     int fd;
     std::string path;
@@ -34,7 +42,7 @@ struct TestFile {
         fd = open(path.c_str(), O_CREAT | O_RDWR | O_TRUNC, 0644);
         assert(fd >= 0);
         std::vector<char> buf(size, fill);
-        (void)pwrite(fd, buf.data(), size, 0);
+        CHECK_IO(pwrite(fd, buf.data(), size, 0), size);
         fsync(fd);
     }
     ~TestFile() {
@@ -205,7 +213,7 @@ bool test_vram_to_file_write() {
 
     // Read file back and verify
     char rbuf[SMALL_SIZE];
-    (void)pread(file.fd, rbuf, SMALL_SIZE, 0);
+    CHECK_IO(pread(file.fd, rbuf, SMALL_SIZE, 0), SMALL_SIZE);
     bool ok = (rbuf[0] == 'C' && rbuf[SMALL_SIZE - 1] == 'C');
     agent.releaseXferReq(h);
     return ok;
@@ -241,7 +249,7 @@ bool test_vram_to_file_write_swapped() {
     if (wait_xfer(agent, h) != NIXL_SUCCESS) return false;
 
     char rbuf[SMALL_SIZE];
-    (void)pread(file.fd, rbuf, SMALL_SIZE, 0);
+    CHECK_IO(pread(file.fd, rbuf, SMALL_SIZE, 0), SMALL_SIZE);
     bool ok = (rbuf[0] == 'D' && rbuf[SMALL_SIZE - 1] == 'D');
     agent.releaseXferReq(h);
     return ok;
@@ -260,7 +268,7 @@ bool test_large_multi_desc() {
     // Write unique pattern per block
     for (int i = 0; i < NUM_BLOCKS; i++) {
         std::vector<char> buf(MEDIUM_SIZE, 'A' + (i % 26));
-        (void)pwrite(file.fd, buf.data(), MEDIUM_SIZE, i * MEDIUM_SIZE);
+        CHECK_IO(pwrite(file.fd, buf.data(), MEDIUM_SIZE, i * MEDIUM_SIZE), MEDIUM_SIZE);
     }
     fsync(file.fd);
 
