@@ -317,7 +317,7 @@ bool test_dram_file_regression() {
 
     // Use regular DRAM (posix_memalign)
     void* host_buf = nullptr;
-    posix_memalign(&host_buf, 4096, SMALL_SIZE);
+    if (posix_memalign(&host_buf, 4096, SMALL_SIZE) != 0) return false;
     memset(host_buf, 0, SMALL_SIZE);
 
     nixl_reg_dlist_t freg(FILE_SEG);
