@@ -47,9 +47,9 @@ struct GpuBuf {
     void* ptr;
     size_t size;
 
-    GpuBuf(size_t sz) : size(sz), ptr(nullptr) {
-        cudaError_t err = cudaMalloc(&ptr, sz);
-        assert(err == cudaSuccess);
+    GpuBuf(size_t sz) : ptr(nullptr), size(sz) {
+        cudaError_t ret = cudaMalloc(&ptr, sz);
+        assert(ret == cudaSuccess);
         cudaMemset(ptr, 0, sz);
     }
     ~GpuBuf() { if (ptr) cudaFree(ptr); }
