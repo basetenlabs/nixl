@@ -317,6 +317,63 @@ impl Agent {
         }
     }
 
+    /// Registers a caller-built descriptor list with the agent.
+    ///
+    /// Unlike [`register_memory`](Self::register_memory), which wraps a single
+    /// [`NixlDescriptor`] and builds the registration list internally (without
+    /// per-descriptor `metaInfo`), this entry point takes a [`RegDescList`]
+    /// the caller has already populated. Because [`RegDescList::add_desc_with_meta`]
+    /// is public, callers can attach the per-descriptor metadata bytes that some
+    /// backends require -- notably the OBJ (S3) plugin, which expects the bucket
+    /// and object key in `metaInfo` per the backend guide.
+    ///
+    /// On success, returns one [`RegistrationHandle`] per descriptor in `descs`,
+    /// in order. Each handle is wired to deregister its own region on drop, so
+    /// dropping the `Vec` deregisters the whole batch.
+    ///
+    /// # Arguments
+    /// * `descs` - Caller-built registration descriptor list (may carry `metaInfo`)
+    /// * `opt_args` - Optional arguments for the registration (e.g. backend)
+    pub fn register_memory_from_dlist(
+        &self,
+        descs: &RegDescList,
+        opt_args: Option<&OptArgs>,
+    ) -> Result<Vec<RegistrationHandle>, NixlError> {
+        let mem_type = descs.get_type()?;
+        let count = descs.len()?;
+        if count == 0 {
+            return Err(NixlError::InvalidParam);
+        }
+
+        let status = unsafe {
+            nixl_capi_register_mem(
+                self.inner.write().unwrap().handle.as_ptr(),
+                descs.handle(),
+                opt_args.map_or(std::ptr::null_mut(), |args| args.inner.as_ptr()),
+            )
+        };
+
+        match status {
+            NIXL_CAPI_SUCCESS => {
+                let agent = self.inner.clone();
+                let mut handles = Vec::with_capacity(count);
+                for i in 0..count {
+                    let d = descs.get(i)?;
+                    handles.push(RegistrationHandle {
+                        agent: Some(agent.clone()),
+                        ptr: d.addr,
+                        size: d.len,
+                        dev_id: d.dev_id,
+                        mem_type,
+                    });
+                }
+                Ok(handles)
+            }
+            NIXL_CAPI_ERROR_INVALID_PARAM => Err(NixlError::InvalidParam),
+            _ => Err(NixlError::BackendError),
+        }
+    }
+
     /// Query information about memory/storage
     ///
     /// # Arguments
