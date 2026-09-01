@@ -965,7 +965,24 @@ makePublicMetadataRkeys(const ucx_connection_ptr_t &conn, const size_t count, co
     result.reserve(count);
 
     for (size_t i = 0; i < count; ++i) {
-        result.emplace_back(*conn->getEp(i), buffer);
+        const auto &ep = conn->getEp(i);
+        // ucp_ep_create only starts the wireup, so an endpoint reports
+        // CONNECTED before it is usable and moves to FAILED from the error
+        // callback if the wireup does not complete -- an ibv_create_ah that
+        // fails against a peer whose GID has changed, for instance. Unpacking
+        // an rkey against such an endpoint faults inside UCX rather than
+        // returning a status, so the state has to be checked here.
+        if (!ep) {
+            throw std::runtime_error("Remote endpoint " + std::to_string(i) +
+                                     " is missing");
+        }
+        const nixl_status_t ep_status = ep->checkTxState();
+        if (ep_status != NIXL_SUCCESS) {
+            throw std::runtime_error("Remote endpoint " + std::to_string(i) +
+                                     " is not usable, status " +
+                                     std::to_string(static_cast<int>(ep_status)));
+        }
+        result.emplace_back(*ep, buffer);
     }
     return result;
 }
