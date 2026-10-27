@@ -374,6 +374,74 @@ impl Agent {
         }
     }
 
+    /// Deregisters many registrations with the agent in one call.
+    ///
+    /// The counterpart of [`register_memory_from_dlist`](Self::register_memory_from_dlist):
+    /// dropping each [`RegistrationHandle`] deregisters its region alone, taking
+    /// the agent lock and rewriting the agent's descriptor list once per handle.
+    /// This deregisters every handle's region in a single `deregisterMem`, so
+    /// the lock is taken and the list is rewritten once for the whole batch.
+    ///
+    /// Handles already deregistered are skipped. On success the remaining
+    /// handles are consumed without deregistering again on drop.
+    ///
+    /// `deregisterMem` is all or nothing: if any region is not registered it
+    /// deregisters none of them. On any error the handles are dropped, so each
+    /// deregisters its own region as it would have without this call, and the
+    /// error is returned so the caller knows the batch path was not taken.
+    ///
+    /// # Arguments
+    /// * `handles` - Registrations made by this agent, all of one memory type
+    /// * `opt_args` - Optional arguments for the deregistration (e.g. backend)
+    pub fn deregister_memory_from_dlist(
+        &self,
+        handles: Vec<RegistrationHandle>,
+        opt_args: Option<&OptArgs>,
+    ) -> Result<(), NixlError> {
+        let mut handles: Vec<RegistrationHandle> = handles
+            .into_iter()
+            .filter(|handle| handle.agent.is_some())
+            .collect();
+        let Some(first) = handles.first() else {
+            return Ok(());
+        };
+        let mem_type = first.mem_type;
+        let foreign = handles.iter().any(|handle| {
+            handle.mem_type != mem_type
+                || !handle
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| Arc::ptr_eq(agent, &self.inner))
+        });
+        if foreign {
+            return Err(NixlError::InvalidParam);
+        }
+
+        let mut descs = RegDescList::new(mem_type)?;
+        for handle in &handles {
+            descs.add_desc(handle.ptr, handle.size, handle.dev_id);
+        }
+
+        let status = unsafe {
+            nixl_capi_deregister_mem(
+                self.inner.write().unwrap().handle.as_ptr(),
+                descs.handle(),
+                opt_args.map_or(std::ptr::null_mut(), |args| args.inner.as_ptr()),
+            )
+        };
+
+        match status {
+            NIXL_CAPI_SUCCESS => {
+                for handle in &mut handles {
+                    handle.agent = None;
+                }
+                Ok(())
+            }
+            NIXL_CAPI_ERROR_INVALID_PARAM => Err(NixlError::InvalidParam),
+            _ => Err(NixlError::BackendError),
+        }
+    }
+
     /// Query information about memory/storage
     ///
     /// # Arguments

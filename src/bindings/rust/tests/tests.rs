@@ -534,6 +534,64 @@ fn test_make_connection_invalid_param() {
 }
 
 #[test]
+fn test_deregister_memory_from_dlist() {
+    let agent = Agent::new("test_deregister_dlist").unwrap();
+    let opt_args = setup_agent_with_backend(&agent).unwrap();
+    let initial_size = agent.get_local_md().unwrap().len();
+
+    let buffers: Vec<Vec<u8>> = (0..4).map(|_| vec![0u8; 4096]).collect();
+    let mut descs = RegDescList::new(MemType::Dram).unwrap();
+    for buffer in &buffers {
+        descs.add_desc(buffer.as_ptr() as usize, buffer.len(), 0);
+    }
+    let handles = agent
+        .register_memory_from_dlist(&descs, Some(&opt_args))
+        .expect("Failed to register buffers");
+    assert_eq!(handles.len(), buffers.len());
+    assert!(agent.get_local_md().unwrap().len() > initial_size);
+
+    agent
+        .deregister_memory_from_dlist(handles, Some(&opt_args))
+        .expect("Failed to deregister buffers in one call");
+    assert_eq!(agent.get_local_md().unwrap().len(), initial_size);
+
+    // Nothing is left registered, so the same memory registers again.
+    let handles = agent
+        .register_memory_from_dlist(&descs, Some(&opt_args))
+        .expect("Failed to register buffers again");
+    drop(handles);
+    assert_eq!(agent.get_local_md().unwrap().len(), initial_size);
+
+    agent
+        .deregister_memory_from_dlist(Vec::new(), None)
+        .expect("An empty batch deregisters nothing");
+}
+
+#[test]
+fn test_deregister_memory_from_dlist_refuses_another_agents_handles() {
+    let agent1 = Agent::new("test_deregister_dlist_a").unwrap();
+    let agent2 = Agent::new("test_deregister_dlist_b").unwrap();
+    let opt_args1 = setup_agent_with_backend(&agent1).unwrap();
+    setup_agent_with_backend(&agent2).unwrap();
+    let initial_size = agent1.get_local_md().unwrap().len();
+
+    let buffer = vec![0u8; 4096];
+    let mut descs = RegDescList::new(MemType::Dram).unwrap();
+    descs.add_desc(buffer.as_ptr() as usize, buffer.len(), 0);
+    let handles = agent1
+        .register_memory_from_dlist(&descs, Some(&opt_args1))
+        .expect("Failed to register buffer");
+
+    let result = agent2.deregister_memory_from_dlist(handles, None);
+    assert!(
+        matches!(result, Err(NixlError::InvalidParam)),
+        "got {result:?}"
+    );
+    // The refused handles were dropped, each deregistering with its own agent.
+    assert_eq!(agent1.get_local_md().unwrap().len(), initial_size);
+}
+
+#[test]
 fn test_get_local_md() {
     let agent = Agent::new("test_agent").unwrap();
 
