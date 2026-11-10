@@ -78,7 +78,7 @@ impl XferRequest {
 
         let status = unsafe {
             nixl_capi_get_xfer_telemetry(
-                self.agent.write().unwrap().handle.as_ptr(),
+                crate::agent::call_guard(&self.agent).handle.as_ptr(),
                 self.handle(),
                 &mut telemetry,
             )

@@ -103,8 +103,10 @@ impl Agent {
                 // SAFETY: If status is NIXL_CAPI_SUCCESS, agent is non-null
                 let handle = unsafe { NonNull::new_unchecked(agent) };
                 tracing::trace!(agent.name = %name, "Successfully created configured NIXL agent");
+                let mut inner = AgentInner::new(handle, name.to_string());
+                inner.concurrent_calls = matches!(cfg.thread_sync, ThreadSync::Rw);
                 Ok(Self {
-                    inner: Arc::new(RwLock::new(AgentInner::new(handle, name.to_string()))),
+                    inner: Arc::new(RwLock::new(inner)),
                 })
             }
             NIXL_CAPI_ERROR_INVALID_PARAM => {
@@ -298,7 +300,7 @@ impl Agent {
 
         let status = unsafe {
             nixl_capi_register_mem(
-                self.inner.write().unwrap().handle.as_ptr(),
+                call_guard(&self.inner).handle.as_ptr(),
                 reg_dlist.handle(),
                 opt_args.map_or(std::ptr::null_mut(), |args| args.inner.as_ptr()),
             )
@@ -347,7 +349,7 @@ impl Agent {
 
         let status = unsafe {
             nixl_capi_register_mem(
-                self.inner.write().unwrap().handle.as_ptr(),
+                call_guard(&self.inner).handle.as_ptr(),
                 descs.handle(),
                 opt_args.map_or(std::ptr::null_mut(), |args| args.inner.as_ptr()),
             )
@@ -424,7 +426,7 @@ impl Agent {
 
         let status = unsafe {
             nixl_capi_deregister_mem(
-                self.inner.write().unwrap().handle.as_ptr(),
+                call_guard(&self.inner).handle.as_ptr(),
                 descs.handle(),
                 opt_args.map_or(std::ptr::null_mut(), |args| args.inner.as_ptr()),
             )
@@ -912,7 +914,7 @@ impl Agent {
         tracing::trace!(remote_agent = %remote_agent, "Sending notification");
 
         let c_remote_name = CString::new(remote_agent)?;
-        let inner_guard = self.inner.write().unwrap();
+        let inner_guard = call_guard(&self.inner);
 
         let opt_args = if backend.is_some() {
             let mut args = OptArgs::new()?;
@@ -1061,7 +1063,7 @@ impl Agent {
         tracing::trace!("Posting transfer request");
         let status = unsafe {
             nixl_capi_post_xfer_req(
-                self.inner.write().unwrap().handle.as_ptr(),
+                call_guard(&self.inner).handle.as_ptr(),
                 req.handle(),
                 opt_args.map_or(ptr::null_mut(), |args| args.inner.as_ptr()),
             )
@@ -1098,7 +1100,7 @@ impl Agent {
     /// * `req` - Transfer request handle after `post_xfer_req`
     pub fn get_xfer_status(&self, req: &XferRequest) -> Result<XferStatus, NixlError> {
         let status = unsafe {
-            nixl_capi_get_xfer_status(self.inner.write().unwrap().handle.as_ptr(), req.handle())
+            nixl_capi_get_xfer_status(call_guard(&self.inner).handle.as_ptr(), req.handle())
         };
 
         match status {
@@ -1182,6 +1184,12 @@ pub(crate) struct AgentInner {
     pub(crate) handle: NonNull<bindings::nixl_capi_agent_s>,
     pub(crate) backends: HashMap<String, NonNull<bindings::nixl_capi_backend_s>>,
     pub(crate) remotes: HashSet<String>,
+    /// The C++ agent was built with `ThreadSync::Rw`: it locks its own
+    /// state (shared on the data path: create, post, status, notify), so
+    /// calls that only pass `handle` through may run concurrently under this
+    /// wrapper's shared lock. Without it every such call takes the exclusive
+    /// lock, since NIXL then locks nothing.
+    pub(crate) concurrent_calls: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1232,6 +1240,7 @@ impl AgentInner {
             handle,
             backends: HashMap::new(),
             remotes: HashSet::new(),
+            concurrent_calls: false,
         }
     }
 
@@ -1296,4 +1305,31 @@ impl Drop for AgentInner {
         }
         tracing::trace!("NIXL agent dropped");
     }
+}
+
+/// The lock a call that only passes the agent's handle through holds: shared
+/// when the C++ agent locks its own state (see `AgentInner::concurrent_calls`),
+/// else exclusive.
+pub(crate) enum CallGuard<'a> {
+    Shared(std::sync::RwLockReadGuard<'a, AgentInner>),
+    Exclusive(std::sync::RwLockWriteGuard<'a, AgentInner>),
+}
+
+impl std::ops::Deref for CallGuard<'_> {
+    type Target = AgentInner;
+    fn deref(&self) -> &AgentInner {
+        match self {
+            CallGuard::Shared(guard) => guard,
+            CallGuard::Exclusive(guard) => guard,
+        }
+    }
+}
+
+pub(crate) fn call_guard(inner: &RwLock<AgentInner>) -> CallGuard<'_> {
+    let shared = inner.read().unwrap();
+    if shared.concurrent_calls {
+        return CallGuard::Shared(shared);
+    }
+    drop(shared);
+    CallGuard::Exclusive(inner.write().unwrap())
 }

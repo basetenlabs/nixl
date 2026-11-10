@@ -163,7 +163,7 @@ impl RegistrationHandle {
                 reg_dlist.add_desc(self.ptr, self.size, self.dev_id);
                 let _opt_args = OptArgs::new().unwrap();
                 nixl_capi_deregister_mem(
-                    agent.write().unwrap().handle.as_ptr(),
+                    crate::agent::call_guard(&agent).handle.as_ptr(),
                     reg_dlist.handle(),
                     _opt_args.inner.as_ptr(),
                 );
