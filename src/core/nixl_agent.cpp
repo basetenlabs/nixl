@@ -17,6 +17,7 @@
 
 #include <iostream>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <numeric>
 #include <optional>
@@ -179,6 +180,57 @@ makeAgentTracer(const std::string &name) {
         return nullptr;
     }
     return nixl::trace::makeTracer(nixl::trace::TracerConfig{name, std::move(requested_backends)});
+}
+
+// Whether a remote agent name can be handed back to callers: well-formed
+// UTF-8 (no overlong forms, surrogates or code points past U+10FFFF) with no
+// NUL. Names leave through C strings, which end at a NUL, and through
+// bindings that require UTF-8; a name failing either would be loaded under a
+// name the caller cannot use to invalidate it, or reads as another agent's.
+[[nodiscard]] bool
+isUsableAgentName(const std::string &name) {
+    static constexpr uint32_t min_code_point[] = {0, 0x80, 0x800, 0x10000};
+    size_t i = 0;
+    while (i < name.size()) {
+        const auto lead = static_cast<unsigned char>(name[i]);
+        if (lead == 0) {
+            return false;
+        }
+        if (lead < 0x80) {
+            i++;
+            continue;
+        }
+        size_t extra;
+        uint32_t code_point;
+        if ((lead & 0xE0) == 0xC0) {
+            extra = 1;
+            code_point = lead & 0x1F;
+        } else if ((lead & 0xF0) == 0xE0) {
+            extra = 2;
+            code_point = lead & 0x0F;
+        } else if ((lead & 0xF8) == 0xF0) {
+            extra = 3;
+            code_point = lead & 0x07;
+        } else {
+            return false;
+        }
+        if (name.size() - i <= extra) {
+            return false;
+        }
+        for (size_t k = 1; k <= extra; k++) {
+            const auto cont = static_cast<unsigned char>(name[i + k]);
+            if ((cont & 0xC0) != 0x80) {
+                return false;
+            }
+            code_point = (code_point << 6) | (cont & 0x3F);
+        }
+        if (code_point < min_code_point[extra] || code_point > 0x10FFFF ||
+            (code_point >= 0xD800 && code_point <= 0xDFFF)) {
+            return false;
+        }
+        i += extra + 1;
+    }
+    return true;
 }
 
 } // namespace
@@ -1614,6 +1666,13 @@ nixlAgent::loadRemoteMD (const nixl_blob_t &remote_metadata,
     if (remote_agent == data->name_) {
         NIXL_ERROR_FUNC << "remote agent name same as local agent, "
                            "no need to load metadata";
+        return NIXL_ERR_INVALID_PARAM;
+    }
+
+    // Before anything loads under it.
+    if (!isUsableAgentName(remote_agent)) {
+        NIXL_ERROR_FUNC << "remote agent name is not NUL-free UTF-8 (" << remote_agent.size()
+                        << " bytes)";
         return NIXL_ERR_INVALID_PARAM;
     }
 

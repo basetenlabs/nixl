@@ -572,6 +572,22 @@ impl Agent {
     /// Loads remote metadata from a byte slice
     pub fn load_remote_md(&self, metadata: &[u8]) -> Result<String, NixlError> {
         tracing::trace!(metadata.size = metadata.len(), "Loading remote metadata");
+        // NIXL returns the name as a C string, after it has loaded the metadata
+        // under it: one that is not UTF-8 or holds a NUL would come back
+        // unreadable or as a different agent's name, loaded where nothing can
+        // invalidate it. Refuse such a name before anything loads.
+        let expected = md_agent_name(metadata)?;
+        if let Some(name) = expected {
+            if std::str::from_utf8(name).map_or(true, |name| name.contains('\0')) {
+                tracing::error!(
+                    error = "invalid_param",
+                    remote.agent = %name_for_log(name),
+                    remote.agent_len = name.len(),
+                    "Remote agent name is not a NUL-free UTF-8 string"
+                );
+                return Err(NixlError::InvalidParam);
+            }
+        }
         let mut agent_name = std::ptr::null_mut();
 
         let status = unsafe {
@@ -586,11 +602,25 @@ impl Agent {
         match status {
             NIXL_CAPI_SUCCESS => {
                 let name = unsafe {
-                    let c_str = std::ffi::CStr::from_ptr(agent_name);
-                    let s = c_str.to_str().unwrap().to_string();
+                    let name = std::ffi::CStr::from_ptr(agent_name).to_bytes().to_vec();
                     libc::free(agent_name as *mut libc::c_void);
-                    s
+                    name
                 };
+                // NIXL read the name where the check above did, so they match
+                // unless its header format moved; this fork's NIXL also refuses
+                // such names itself, so only another libnixl_capi can get here.
+                // The metadata is loaded by then under a name that cannot be
+                // trusted to be the whole one, so it is left in place: unloading
+                // by it might hit another agent.
+                if expected != Some(name.as_slice()) {
+                    tracing::error!(
+                        error = "invalid_param",
+                        remote.agent = %name_for_log(&name),
+                        "Remote agent name differs from the one in the metadata"
+                    );
+                    return Err(NixlError::InvalidParam);
+                }
+                let name = String::from_utf8(name).map_err(|_| NixlError::InvalidParam)?;
                 self.inner.write().unwrap().remotes.insert(name.clone());
                 tracing::trace!(remote.agent = %name, "Successfully loaded remote metadata");
                 Ok(name)
@@ -1194,6 +1224,32 @@ pub enum ThreadSync {
 
 // Must match `default_comm_port` in nixl_types.h
 pub const DEFAULT_COMM_PORT: i32 = 8888;
+
+/// The agent name `metadata` carries, read as NIXL's deserializer reads it:
+/// `nixlSerDes|`, then the `Agent` tag, a native-endian `size_t` length, the
+/// name and a `|`. `None` when the metadata does not start with that header,
+/// which NIXL refuses too. A length past the end is an error: NIXL's bounds
+/// check on it can wrap around and read some other span as the name.
+fn md_agent_name(metadata: &[u8]) -> Result<Option<&[u8]>, NixlError> {
+    let header = metadata
+        .strip_prefix(b"nixlSerDes|")
+        .and_then(|rest| rest.strip_prefix(b"Agent"))
+        .and_then(|rest| rest.split_first_chunk::<{ std::mem::size_of::<usize>() }>());
+    let Some((len, rest)) = header else {
+        return Ok(None);
+    };
+    let len = usize::from_ne_bytes(*len);
+    if len >= rest.len() {
+        tracing::error!(error = "invalid_param", remote.agent_len = len, "Remote agent name runs past the metadata");
+        return Err(NixlError::InvalidParam);
+    }
+    Ok(Some(&rest[..len]))
+}
+
+/// A remote-chosen name, cut short and made printable for a log line.
+fn name_for_log(name: &[u8]) -> String {
+    String::from_utf8_lossy(&name[..name.len().min(64)]).escape_debug().to_string()
+}
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
