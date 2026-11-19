@@ -607,9 +607,11 @@ impl Agent {
                     name
                 };
                 // NIXL read the name where the check above did, so they match
-                // unless its header format moved. The metadata is loaded by then
-                // under a name that cannot be trusted to be the whole one, so it
-                // is left in place: unloading by it might hit another agent.
+                // unless its header format moved; this fork's NIXL also refuses
+                // such names itself, so only another libnixl_capi can get here.
+                // The metadata is loaded by then under a name that cannot be
+                // trusted to be the whole one, so it is left in place: unloading
+                // by it might hit another agent.
                 if expected != Some(name.as_slice()) {
                     tracing::error!(
                         error = "invalid_param",

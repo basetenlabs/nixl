@@ -245,6 +245,9 @@ nixl_capi_load_remote_md(nixl_capi_agent_t agent, const void* data, size_t len, 
 
     // Load the metadata
     nixl_status_t ret = agent->inner->loadRemoteMD(blob, name);
+    if (ret == NIXL_ERR_INVALID_PARAM) {
+      return NIXL_CAPI_ERROR_INVALID_PARAM;
+    }
     if (ret != NIXL_SUCCESS) {
       return NIXL_CAPI_ERROR_BACKEND;
     }
