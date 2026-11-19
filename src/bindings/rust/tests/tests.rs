@@ -2409,11 +2409,35 @@ fn test_load_remote_md_rejects_name_with_nul() {
 }
 
 #[test]
+fn test_load_remote_md_rejects_name_length_past_the_end() {
+    let (agent_a, _) = create_agent_with_backend("length-agent-a").unwrap();
+    let (loader, _) = create_agent_with_backend("length-loader").unwrap();
+    let md = agent_a.get_local_md().unwrap();
+    // The length sits after `nixlSerDes|Agent`; the name and its `|` follow.
+    let at = "nixlSerDes|Agent".len();
+    let room = md.len() - at - std::mem::size_of::<usize>();
+    // One past the end, and a length whose bounds check in NIXL wraps around.
+    for len in [room, usize::MAX - at] {
+        let mut bad = md.clone();
+        bad[at..at + std::mem::size_of::<usize>()].copy_from_slice(&len.to_ne_bytes());
+        assert!(matches!(loader.load_remote_md(&bad), Err(NixlError::InvalidParam)), "length {len}");
+    }
+    assert_eq!(loader.load_remote_md(&md).unwrap(), "length-agent-a");
+}
+
+#[test]
 fn test_load_remote_md_loads_partial_metadata() {
-    // The name check reads the same header from partial metadata.
+    // Connection info first, then the sections for one registered buffer,
+    // which carries the same header but no connection info.
     let (agent_a, _) = create_agent_with_backend("partial-agent-a").unwrap();
     let (loader, _) = create_agent_with_backend("partial-loader").unwrap();
-    let descs = RegDescList::new(MemType::Dram).unwrap();
+    let conns = agent_a.get_local_partial_md(&RegDescList::new(MemType::Dram).unwrap(), None).unwrap();
+    assert_eq!(loader.load_remote_md(&conns).unwrap(), "partial-agent-a");
+
+    let mut storage = SystemStorage::new(256).unwrap();
+    storage.register(&agent_a, None).unwrap();
+    let mut descs = RegDescList::new(MemType::Dram).unwrap();
+    descs.add_storage_desc(&storage).unwrap();
     let md = agent_a.get_local_partial_md(&descs, None).unwrap();
     assert_eq!(loader.load_remote_md(&md).unwrap(), "partial-agent-a");
 }
