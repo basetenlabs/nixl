@@ -587,9 +587,21 @@ impl Agent {
             NIXL_CAPI_SUCCESS => {
                 let name = unsafe {
                     let c_str = std::ffi::CStr::from_ptr(agent_name);
-                    let s = c_str.to_str().unwrap().to_string();
+                    let s = c_str.to_str().map(str::to_string);
+                    // The metadata is loaded under a name no &str can spell, so
+                    // nothing could ever invalidate it: unload it by the C name.
+                    if s.is_err() {
+                        nixl_capi_invalidate_remote_md(
+                            self.inner.write().unwrap().handle.as_ptr(),
+                            agent_name,
+                        );
+                    }
                     libc::free(agent_name as *mut libc::c_void);
                     s
+                };
+                let Ok(name) = name else {
+                    tracing::error!(error = "invalid_param", "Remote agent name is not UTF-8");
+                    return Err(NixlError::InvalidParam);
                 };
                 self.inner.write().unwrap().remotes.insert(name.clone());
                 tracing::trace!(remote.agent = %name, "Successfully loaded remote metadata");

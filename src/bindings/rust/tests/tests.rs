@@ -2359,3 +2359,44 @@ fn test_desc_list_serialize_with_real_storage() {
     test_serialization!(XferDescList, storage_list.iter());
     test_serialization!(RegDescList, storage_list.iter());
 }
+
+/// `agent`'s metadata with every occurrence of its name's last byte swapped
+/// for 0xff, so the name it loads under is no longer UTF-8.
+fn md_with_non_utf8_name(agent: &Agent, name: &str) -> Vec<u8> {
+    let mut md = agent.get_local_md().unwrap();
+    let name = name.as_bytes();
+    let starts: Vec<usize> = md
+        .windows(name.len())
+        .enumerate()
+        .filter(|(_, window)| *window == name)
+        .map(|(start, _)| start)
+        .collect();
+    assert!(!starts.is_empty(), "the metadata carries the agent name");
+    for start in starts {
+        md[start + name.len() - 1] = 0xff;
+    }
+    md
+}
+
+#[test]
+fn test_load_remote_md_rejects_non_utf8_name() {
+    // Same-length names, so both patch to the same non-UTF-8 name.
+    let agent_a = Agent::new("utf8-agent-a").unwrap();
+    let agent_b = Agent::new("utf8-agent-b").unwrap();
+    let loader = Agent::new("utf8-loader").unwrap();
+    for agent in [&agent_a, &agent_b, &loader] {
+        let (_mems, params) = agent.get_plugin_params("UCX").unwrap();
+        agent.create_backend("UCX", &params).unwrap();
+    }
+
+    let md_a = md_with_non_utf8_name(&agent_a, "utf8-agent-a");
+    let md_b = md_with_non_utf8_name(&agent_b, "utf8-agent-b");
+    assert!(matches!(loader.load_remote_md(&md_a), Err(NixlError::InvalidParam)));
+    // Had the first load stayed in NIXL under that name, B's different UCX
+    // connection info would be refused as a change (a backend error).
+    assert!(matches!(loader.load_remote_md(&md_b), Err(NixlError::InvalidParam)));
+
+    // The agent still loads well-formed metadata.
+    let md = agent_a.get_local_md().unwrap();
+    assert_eq!(loader.load_remote_md(&md).unwrap(), "utf8-agent-a");
+}
