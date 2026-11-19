@@ -574,9 +574,13 @@ impl Agent {
         tracing::trace!(metadata.size = metadata.len(), "Loading remote metadata");
         let mut agent_name = std::ptr::null_mut();
 
+        // One guard for the load and any unload below, so no other load of the
+        // same remote can land between them.
+        let mut inner = self.inner.write().unwrap();
+
         let status = unsafe {
             nixl_capi_load_remote_md(
-                self.inner.write().unwrap().handle.as_ptr(),
+                inner.handle.as_ptr(),
                 metadata.as_ptr() as *const std::ffi::c_void,
                 metadata.len(),
                 &mut agent_name,
@@ -589,21 +593,24 @@ impl Agent {
                     let c_str = std::ffi::CStr::from_ptr(agent_name);
                     let s = c_str.to_str().map(str::to_string);
                     // The metadata is loaded under a name no &str can spell, so
-                    // nothing could ever invalidate it: unload it by the C name.
+                    // nothing could ever invalidate it: unload it by the C name,
+                    // which the wrapper guarantees is the whole name.
                     if s.is_err() {
-                        nixl_capi_invalidate_remote_md(
-                            self.inner.write().unwrap().handle.as_ptr(),
-                            agent_name,
+                        let unload = nixl_capi_invalidate_remote_md(inner.handle.as_ptr(), agent_name);
+                        tracing::error!(
+                            error = "invalid_param",
+                            remote.agent = %c_str.to_string_lossy(),
+                            unload.status = unload,
+                            "Remote agent name is not UTF-8"
                         );
                     }
                     libc::free(agent_name as *mut libc::c_void);
                     s
                 };
                 let Ok(name) = name else {
-                    tracing::error!(error = "invalid_param", "Remote agent name is not UTF-8");
                     return Err(NixlError::InvalidParam);
                 };
-                self.inner.write().unwrap().remotes.insert(name.clone());
+                inner.remotes.insert(name.clone());
                 tracing::trace!(remote.agent = %name, "Successfully loaded remote metadata");
                 Ok(name)
             }
