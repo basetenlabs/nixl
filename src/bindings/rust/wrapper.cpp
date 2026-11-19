@@ -249,13 +249,6 @@ nixl_capi_load_remote_md(nixl_capi_agent_t agent, const void* data, size_t len, 
       return NIXL_CAPI_ERROR_BACKEND;
     }
 
-    // The name is returned as a C string, which would end at an embedded NUL
-    // and name a different agent. Unload it by its whole name and refuse it.
-    if (name.find('\0') != std::string::npos) {
-      agent->inner->invalidateRemoteMD(name);
-      return NIXL_CAPI_ERROR_INVALID_PARAM;
-    }
-
     // Allocate and copy the agent name
     char* name_str = strdup(name.c_str());
     if (!name_str) {

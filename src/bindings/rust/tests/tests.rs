@@ -2360,9 +2360,9 @@ fn test_desc_list_serialize_with_real_storage() {
     test_serialization!(RegDescList, storage_list.iter());
 }
 
-/// `agent`'s metadata with byte `at` of its name set to `byte` wherever the
-/// name occurs, so the name it loads under is no longer a valid `&str`.
-fn md_with_name_byte(agent: &Agent, name: &str, at: usize, byte: u8) -> Vec<u8> {
+/// `agent`'s metadata with the last byte of its name set to `byte` wherever
+/// the name occurs, so the name it loads under is no longer a valid `&str`.
+fn md_with_last_name_byte(agent: &Agent, name: &str, byte: u8) -> Vec<u8> {
     let mut md = agent.get_local_md().unwrap();
     let name = name.as_bytes();
     let starts: Vec<usize> = md
@@ -2373,21 +2373,21 @@ fn md_with_name_byte(agent: &Agent, name: &str, at: usize, byte: u8) -> Vec<u8> 
         .collect();
     assert!(!starts.is_empty(), "the metadata carries the agent name");
     for start in starts {
-        md[start + at] = byte;
+        md[start + name.len() - 1] = byte;
     }
     md
 }
 
 /// Loads two agents' metadata patched to the same invalid name: both must be
 /// refused, and the loader must still load well-formed metadata after.
-fn assert_invalid_name_refused(at: usize, byte: u8) {
-    // Same-length names, so both patch to the same invalid name.
+fn assert_invalid_name_refused(byte: u8) {
+    // The names differ only in their last byte, so both patch to one name.
     let (agent_a, _) = create_agent_with_backend("utf8-agent-a").unwrap();
     let (agent_b, _) = create_agent_with_backend("utf8-agent-b").unwrap();
     let (loader, _) = create_agent_with_backend("utf8-loader").unwrap();
 
-    let md_a = md_with_name_byte(&agent_a, "utf8-agent-a", at, byte);
-    let md_b = md_with_name_byte(&agent_b, "utf8-agent-b", at, byte);
+    let md_a = md_with_last_name_byte(&agent_a, "utf8-agent-a", byte);
+    let md_b = md_with_last_name_byte(&agent_b, "utf8-agent-b", byte);
     assert!(matches!(loader.load_remote_md(&md_a), Err(NixlError::InvalidParam)));
     // Had the first load stayed in NIXL under that name, B's different UCX
     // connection info would be refused as a change (a backend error).
@@ -2399,11 +2399,21 @@ fn assert_invalid_name_refused(at: usize, byte: u8) {
 
 #[test]
 fn test_load_remote_md_rejects_non_utf8_name() {
-    assert_invalid_name_refused("utf8-agent-a".len() - 1, 0xff);
+    assert_invalid_name_refused(0xff);
 }
 
 #[test]
 fn test_load_remote_md_rejects_name_with_nul() {
-    // As a C string this would read "utf8-agent", a valid but different name.
-    assert_invalid_name_refused("utf8-agent".len(), 0);
+    // As a C string this would read "utf8-agent-", a valid but different name.
+    assert_invalid_name_refused(0);
+}
+
+#[test]
+fn test_load_remote_md_loads_partial_metadata() {
+    // The name check reads the same header from partial metadata.
+    let (agent_a, _) = create_agent_with_backend("partial-agent-a").unwrap();
+    let (loader, _) = create_agent_with_backend("partial-loader").unwrap();
+    let descs = RegDescList::new(MemType::Dram).unwrap();
+    let md = agent_a.get_local_partial_md(&descs, None).unwrap();
+    assert_eq!(loader.load_remote_md(&md).unwrap(), "partial-agent-a");
 }

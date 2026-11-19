@@ -572,15 +572,25 @@ impl Agent {
     /// Loads remote metadata from a byte slice
     pub fn load_remote_md(&self, metadata: &[u8]) -> Result<String, NixlError> {
         tracing::trace!(metadata.size = metadata.len(), "Loading remote metadata");
+        // NIXL returns the name as a C string, after it has loaded the metadata
+        // under it: one that is not UTF-8 or holds a NUL would come back
+        // unreadable or as a different agent's name, loaded where nothing can
+        // invalidate it. Refuse such a name before anything loads.
+        if let Some(name) = md_agent_name(metadata) {
+            if name.contains(&0) || std::str::from_utf8(name).is_err() {
+                tracing::error!(
+                    error = "invalid_param",
+                    remote.agent = %String::from_utf8_lossy(name),
+                    "Remote agent name is not a NUL-free UTF-8 string"
+                );
+                return Err(NixlError::InvalidParam);
+            }
+        }
         let mut agent_name = std::ptr::null_mut();
-
-        // One guard for the load and any unload below, so no other load of the
-        // same remote can land between them.
-        let mut inner = self.inner.write().unwrap();
 
         let status = unsafe {
             nixl_capi_load_remote_md(
-                inner.handle.as_ptr(),
+                self.inner.write().unwrap().handle.as_ptr(),
                 metadata.as_ptr() as *const std::ffi::c_void,
                 metadata.len(),
                 &mut agent_name,
@@ -592,25 +602,16 @@ impl Agent {
                 let name = unsafe {
                     let c_str = std::ffi::CStr::from_ptr(agent_name);
                     let s = c_str.to_str().map(str::to_string);
-                    // The metadata is loaded under a name no &str can spell, so
-                    // nothing could ever invalidate it: unload it by the C name,
-                    // which the wrapper guarantees is the whole name.
-                    if s.is_err() {
-                        let unload = nixl_capi_invalidate_remote_md(inner.handle.as_ptr(), agent_name);
-                        tracing::error!(
-                            error = "invalid_param",
-                            remote.agent = %c_str.to_string_lossy(),
-                            unload.status = unload,
-                            "Remote agent name is not UTF-8"
-                        );
-                    }
                     libc::free(agent_name as *mut libc::c_void);
                     s
                 };
+                // Unreachable after the check above, unless NIXL reads the name
+                // from somewhere else; an error is still better than a panic.
                 let Ok(name) = name else {
+                    tracing::error!(error = "invalid_param", "Remote agent name is not UTF-8");
                     return Err(NixlError::InvalidParam);
                 };
-                inner.remotes.insert(name.clone());
+                self.inner.write().unwrap().remotes.insert(name.clone());
                 tracing::trace!(remote.agent = %name, "Successfully loaded remote metadata");
                 Ok(name)
             }
@@ -1213,6 +1214,16 @@ pub enum ThreadSync {
 
 // Must match `default_comm_port` in nixl_types.h
 pub const DEFAULT_COMM_PORT: i32 = 8888;
+
+/// The agent name `metadata` carries, read as NIXL's deserializer reads it:
+/// `nixlSerDes|`, then the `Agent` tag, a native-endian `size_t` length and
+/// the name. `None` when the metadata does not start that way, which NIXL
+/// then refuses itself.
+fn md_agent_name(metadata: &[u8]) -> Option<&[u8]> {
+    let rest = metadata.strip_prefix(b"nixlSerDes|")?.strip_prefix(b"Agent")?;
+    let (len, rest) = rest.split_first_chunk::<{ std::mem::size_of::<usize>() }>()?;
+    rest.get(..usize::from_ne_bytes(*len))
+}
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
