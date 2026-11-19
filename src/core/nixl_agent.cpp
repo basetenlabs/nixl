@@ -193,7 +193,9 @@ isUsableAgentName(const std::string &name) {
     size_t i = 0;
     while (i < name.size()) {
         const auto lead = static_cast<unsigned char>(name[i]);
-        if (lead == 0) return false;
+        if (lead == 0) {
+            return false;
+        }
         if (lead < 0x80) {
             i++;
             continue;
@@ -212,15 +214,20 @@ isUsableAgentName(const std::string &name) {
         } else {
             return false;
         }
-        if (name.size() - i <= extra) return false;
+        if (name.size() - i <= extra) {
+            return false;
+        }
         for (size_t k = 1; k <= extra; k++) {
             const auto cont = static_cast<unsigned char>(name[i + k]);
-            if ((cont & 0xC0) != 0x80) return false;
+            if ((cont & 0xC0) != 0x80) {
+                return false;
+            }
             code_point = (code_point << 6) | (cont & 0x3F);
         }
         if (code_point < min_code_point[extra] || code_point > 0x10FFFF ||
-            (code_point >= 0xD800 && code_point <= 0xDFFF))
+            (code_point >= 0xD800 && code_point <= 0xDFFF)) {
             return false;
+        }
         i += extra + 1;
     }
     return true;
